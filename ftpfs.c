@@ -174,6 +174,7 @@ static struct fuse_opt ftpfs_opts[] = {
   FTPFS_OPT("codepage=%s",        codepage, 0),
   FTPFS_OPT("iocharset=%s",       iocharset, 0),
   FTPFS_OPT("nomulticonn",        multiconn, 0),
+  FTPFS_OPT("file_postfix=%s",    postfix_str, 0),
 
   FUSE_OPT_KEY("-h",             KEY_HELP),
   FUSE_OPT_KEY("--help",         KEY_HELP),
@@ -496,7 +497,6 @@ int write_thread_ctr = 0;
 
 static void *ftpfs_write_thread(void *data) {
   struct ftpfs_file *fh = data;
-  char range[15];
   
   DEBUG(2, "enter streaming write thread #%d path=%s pos=%lld\n", ++write_thread_ctr, fh->full_path, fh->pos);
   
@@ -516,7 +516,6 @@ static void *ftpfs_write_thread(void *data) {
     /* resuming a streaming write */
     //snprintf(range, 15, "%lld-", (long long) fh->pos);
     //curl_easy_setopt_or_die(fh->write_conn, CURLOPT_RANGE, range);
-	  
 	curl_easy_setopt_or_die(fh->write_conn, CURLOPT_APPEND, 1);
 	  
 	//curl_easy_setopt_or_die(fh->write_conn, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)fh->pos);
@@ -696,9 +695,9 @@ static __off_t test_size(const char* path)
 	return sbuf.st_size;
 }
 
-static int ftpfs_open_common(const char* path, mode_t mode,
+static int ftpfs_open_common(char* path, mode_t mode,
                              struct fuse_file_info* fi) {
-	
+
   char * flagsAsStr = flags_to_string(fi->flags);
   DEBUG(2, "ftpfs_open_common: %s\n", flagsAsStr);
   int err = 0;
@@ -730,6 +729,7 @@ static int ftpfs_open_common(const char* path, mode_t mode,
     if (fi->flags & O_CREAT) {
       err = ftpfs_mknod(path, (mode & 07777) | S_IFREG, 0);
     } else {
+
       // If it's read-only, we can load the file a bit at a time, as necessary.
       DEBUG(1, "opening %s O_RDONLY\n", path);
       fh->can_shrink = 1;
@@ -779,8 +779,8 @@ static int ftpfs_open_common(const char* path, mode_t mode,
 	        if (start_write_thread(fh))
 	        {
 	          sem_wait(&fh->ready);
-	          /* chmod makes only sense on O_CREAT */ 
-	          if (fi->flags & O_CREAT) ftpfs_chmod(path, mode);  
+	          /* chmod makes only sense on O_CREAT */
+	          if (fi->flags & O_CREAT) ftpfs_chmod(path, mode);
 	          sem_post(&fh->data_need);
 	        }
 	        else
@@ -834,6 +834,7 @@ static int ftpfs_read(const char* path, char* rbuf, size_t size, off_t offset,
   }
   
   char *full_path = get_full_path(path);
+
   size_t size_read = ftpfs_read_chunk(full_path, rbuf, size, offset, fi, 1);
   free(full_path);
   if (size_read == CURLFTPFS_BAD_READ) {
@@ -857,7 +858,7 @@ static int ftpfs_mknod(const char* path, mode_t mode, dev_t rdev) {
     return -EPERM;
 
   err = create_empty_file(path);
- 
+
   if (!err)
       ftpfs_chmod(path, mode);
 
@@ -866,6 +867,9 @@ static int ftpfs_mknod(const char* path, mode_t mode, dev_t rdev) {
 
 static int ftpfs_chmod(const char* path, mode_t mode) {
   int err = 0;
+
+  if (ftpfs.postfix_str)
+    return err;
 
   // We can only process a subset of the mode - so strip
   // to supported subset
@@ -905,12 +909,15 @@ static int ftpfs_chmod(const char* path, mode_t mode) {
 
 static int ftpfs_chown(const char* path, uid_t uid, gid_t gid) {
   int err = 0;
-  
+
+  if (ftpfs.postfix_str)
+    return err;
+
   DEBUG(1, "ftpfs_chown: %d %d\n", (int)uid, (int)gid);
   
   struct curl_slist* header = NULL;
   char* full_path = get_dir_path(path);
-  char* filename = get_file_name(path);
+  char* filename = get_file_name_dir(path);
   char* cmd = g_strdup_printf("SITE CHUID %i %s", uid, filename);
   char* cmd2 = g_strdup_printf("SITE CHGID %i %s", gid, filename);
   struct buffer buf;
@@ -999,7 +1006,7 @@ static int ftpfs_rmdir(const char* path) {
   int err = 0;
   struct curl_slist* header = NULL;
   char* full_path = get_dir_path(path);
-  char* filename = get_file_name(path);
+  char* filename = get_file_name_dir(path);
   char* cmd = g_strdup_printf("RMD %s", filename);
   struct buffer buf;
   buf_init(&buf);
@@ -1036,7 +1043,7 @@ static int ftpfs_mkdir(const char* path, mode_t mode) {
   int err = 0;
   struct curl_slist* header = NULL;
   char* full_path = get_dir_path(path);
-  char* filename = get_file_name(path);
+  char* filename = get_file_name_dir(path);
   char* cmd = g_strdup_printf("MKD %s", filename);
   struct buffer buf;
   buf_init(&buf);
@@ -1064,8 +1071,8 @@ static int ftpfs_mkdir(const char* path, mode_t mode) {
   free(filename);
   free(cmd);
 
-  if (!err)
-    ftpfs_chmod(path, mode);
+//  if (!err)
+  //  ftpfs_chmod(path, mode);
 
   return op_return(err, "ftpfs_mkdir");
 }
@@ -1197,34 +1204,35 @@ static int ftpfs_flush(const char *path, struct fuse_file_info *fi) {
   struct ftpfs_file* fh = get_ftpfs_file(fi);
 
   DEBUG(1, "ftpfs_flush: buf.len=%zu buf.pos=%lld write_conn=%d\n", fh->buf.len, fh->pos, fh->write_conn!=0);
-  
+
+  /* TODO - ftpfs_flush cause error on mv to remote */
+  return err;
+
   if (fh->write_conn) {
     err = finish_write_thread(fh);
     if (err) return op_return(err, "ftpfs_flush");
-    
     struct stat sbuf;
-    
+
     /* check if the resulting file has the correct size
      this is important, because we use APPE for continuing
      writing after a premature flush */
-    err = ftpfs_getattr(path, &sbuf);   
+    err = ftpfs_getattr(path, &sbuf);
+    fprintf(stderr, "FLUSH Debug ftpfs_getattr = %d", err);
     if (err) return op_return(err, "ftpfs_flush");
-    
+
     if (sbuf.st_size != fh->pos)
     {
     	fh->write_fail_cause = -999;
     	fprintf(stderr, "ftpfs_flush: check filesize problem: size=%lld expected=%lld\n", sbuf.st_size, fh->pos);
     	return op_return(-EIO, "ftpfs_flush");
     }
-    
+
     return 0;
   }
-  
- 
+
   if (!fh->dirty) return 0;
 
   return op_return(-EIO, "ftpfs_flush");
-  
 }
 
 static int ftpfs_fsync(const char *path, int isdatasync,
@@ -1494,6 +1502,7 @@ static void usage(const char* progname) {
 "    utf8                try to transfer file list with utf-8 encoding\n"
 "    codepage=STR        set the codepage the server uses\n"
 "    iocharset=STR       set the charset used by the client\n"
+"    file_postfix=STR    set string that will be appended to file name on server\n"
 "\n"
 "CurlFtpFS cache options:  \n"
 "    cache=yes|no              enable/disable cache (default: yes)\n"
@@ -1740,7 +1749,7 @@ int main(int argc, char** argv) {
   ftpfs.disable_epsv = 1;
   ftpfs.multiconn = 1;
   ftpfs.attached_to_multi = 0;
-  
+
   if (fuse_opt_parse(&args, &ftpfs, ftpfs_opts, ftpfs_opt_proc) == -1)
     exit(1);
 

@@ -186,6 +186,18 @@ static int parse_dir_netware(const char *line,
   return 0;
 }
 
+static void trim_file_extension(char* file) {
+  static postfix_len = 0;
+  int len = strlen(file);
+
+  if (!postfix_len)
+    postfix_len = strlen(ftpfs.postfix_str);
+
+  if (strcmp(ftpfs.postfix_str, &file[len - postfix_len]) == 0) {
+    file[len - postfix_len] = '\0';
+  }
+}
+
 
 int parse_dir(const char* list, const char* dir,
               const char* name, struct stat* sbuf,
@@ -231,6 +243,9 @@ int parse_dir(const char* list, const char* dir,
     int res = parse_dir_unix(line, &stat_buf, file, link) ||
               parse_dir_win(line, &stat_buf, file, link) ||
               parse_dir_netware(line, &stat_buf, file, link);
+
+    if (ftpfs.postfix_str && ~stat_buf.st_mode & S_IFDIR)
+      trim_file_extension(file);
 
     if (res) {
       char *full_path = g_strdup_printf("%s%s", dir, file);

@@ -67,6 +67,7 @@ struct ftpfs {
   char *codepage;
   char *iocharset;
   int multiconn;
+  char *postfix_str;
 };
 
 extern struct ftpfs ftpfs;

@@ -23,14 +23,31 @@ char* get_file_name(const char* path) {
   if (ftpfs.codepage) {
     convert_charsets(ftpfs.iocharset, ftpfs.codepage, &ret);
   }
-  
+
+  if (ftpfs.postfix_str)
+    ret = g_strdup_printf("%s%s", ret, ftpfs.postfix_str);
+
   return ret;
 }
+
+char* get_file_name_dir(const char* path) {
+  const char* filename = strrchr(path, '/');
+  if (filename == NULL) filename = path;
+  else ++filename;
+
+  char* ret = strdup(filename);
+  if (ftpfs.codepage) {
+    convert_charsets(ftpfs.iocharset, ftpfs.codepage, &ret);
+  }
+
+  return ret;
+}
+
 
 char* get_full_path(const char* path) {
   char* ret;
   char* converted_path = NULL;
-  
+
   ++path;
 
   if (ftpfs.codepage && strlen(path)) {
@@ -40,6 +57,8 @@ char* get_full_path(const char* path) {
   }
 
   ret = g_strdup_printf("%s%s", ftpfs.host, path);
+  if (ftpfs.postfix_str)
+    ret = g_strdup_printf("%s%s", ret, ftpfs.postfix_str);
 
   free(converted_path);
 
@@ -71,7 +90,7 @@ char* get_dir_path(const char* path) {
   const char *lastdir;
 
   ++path;
-  
+
   lastdir = strrchr(path, '/');
   if (lastdir == NULL) lastdir = path;
 
